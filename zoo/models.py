@@ -4,12 +4,13 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 import torchvision.models
+import pytorch_lightning as pl
 
 from .senet import se_resnext50_32x4d, senet154
 from .dpn import dpn92
 
 
-class ConvReluBN(nn.Module):
+class ConvReluBN(pl.LightningModule):
     def __init__(self, in_channels, out_channels, kernel_size=3):
         super(ConvReluBN, self).__init__()
         self.layer = nn.Sequential(
@@ -21,7 +22,7 @@ class ConvReluBN(nn.Module):
         return self.layer(x)
 
 
-class ConvRelu(nn.Module):
+class ConvRelu(pl.LightningModule):
     def __init__(self, in_channels, out_channels, kernel_size=3):
         super(ConvRelu, self).__init__()
         self.layer = nn.Sequential(
@@ -32,7 +33,7 @@ class ConvRelu(nn.Module):
         return self.layer(x)
 
 
-class SCSEModule(nn.Module):
+class SCSEModule(pl.LightningModule):
     # according to https://arxiv.org/pdf/1808.08127.pdf concat is better
     def __init__(self, channels, reduction=16, concat=False):
         super(SCSEModule, self).__init__()
@@ -67,7 +68,7 @@ class SCSEModule(nn.Module):
             return chn_se + spa_se
 
 
-class SeResNext50_Unet_Loc(nn.Module):
+class SeResNext50_Unet_Loc(pl.LightningModule):
     def __init__(self, pretrained='imagenet', **kwargs):
         super(SeResNext50_Unet_Loc, self).__init__()
         
@@ -144,7 +145,7 @@ class SeResNext50_Unet_Loc(nn.Module):
                 m.bias.data.zero_()
 
 
-class SeResNext50_Unet_Double(nn.Module):
+class SeResNext50_Unet_Double(pl.LightningModule):
     def __init__(self, pretrained='imagenet', **kwargs):
         super(SeResNext50_Unet_Double, self).__init__()
         
@@ -231,7 +232,7 @@ class SeResNext50_Unet_Double(nn.Module):
                 m.bias.data.zero_()
 
 
-class Dpn92_Unet_Loc(nn.Module):
+class Dpn92_Unet_Loc(pl.LightningModule):
     def __init__(self, pretrained='imagenet+5k', **kwargs):
         super(Dpn92_Unet_Loc, self).__init__()
         
@@ -316,7 +317,7 @@ class Dpn92_Unet_Loc(nn.Module):
                 m.bias.data.zero_()
 
 
-class Dpn92_Unet_Double(nn.Module):
+class Dpn92_Unet_Double(pl.LightningModule):
     def __init__(self, pretrained='imagenet+5k', **kwargs):
         super(Dpn92_Unet_Double, self).__init__()
         
@@ -412,7 +413,7 @@ class Dpn92_Unet_Double(nn.Module):
                 m.bias.data.zero_()
 
 
-class Res34_Unet_Loc(nn.Module):
+class Res34_Unet_Loc(pl.LightningModule):
     def __init__(self, pretrained=True, **kwargs):
         super(Res34_Unet_Loc, self).__init__()
         
@@ -486,7 +487,7 @@ class Res34_Unet_Loc(nn.Module):
                 m.bias.data.zero_()
 
 
-class Res34_Unet_Double(nn.Module):
+class Res34_Unet_Double(pl.LightningModule):
     def __init__(self, pretrained=True, **kwargs):
         super(Res34_Unet_Double, self).__init__()
         
@@ -566,7 +567,7 @@ class Res34_Unet_Double(nn.Module):
                 m.bias.data.zero_()
 
 
-class SeNet154_Unet_Loc(nn.Module):
+class SeNet154_Unet_Loc(pl.LightningModule):
     def __init__(self, pretrained='imagenet', **kwargs):
         super(SeNet154_Unet_Loc, self).__init__()
         
@@ -641,7 +642,7 @@ class SeNet154_Unet_Loc(nn.Module):
                 m.bias.data.zero_()
 
 
-class SeNet154_Unet_Double(nn.Module):
+class SeNet154_Unet_Double(pl.LightningModule):
     def __init__(self, pretrained='imagenet', **kwargs):
         super(SeNet154_Unet_Double, self).__init__()
         

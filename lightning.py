@@ -1,0 +1,254 @@
+import os
+os.environ["MKL_NUM_THREADS"] = "1" 
+os.environ["NUMEXPR_NUM_THREADS"] = "1" 
+os.environ["OMP_NUM_THREADS"] = "1" 
+
+from os import path, makedirs, listdir
+import sys
+import numpy as np
+np.random.seed(1)
+import random
+random.seed(1)
+
+import torch
+from torch import nn
+from torch.backends import cudnn
+from torch.utils.data import Dataset
+from torch.utils.data import DataLoader
+import torch.optim.lr_scheduler as lr_scheduler
+
+from apex import amp
+
+from adamw import AdamW
+from losses import dice_round, ComboLoss
+
+import pandas as pd
+from tqdm import tqdm
+import timeit
+import cv2
+
+from zoo.models import SeResNext50_Unet_Loc
+
+from imgaug import augmenters as iaa
+
+from utils import *
+
+from sklearn.model_selection import train_test_split
+
+from sklearn.metrics import accuracy_score
+
+import gc
+
+from pathlib import Path
+from pytorch_lightning import LightningModule
+from pytorch_lightning import Trainer
+from pytorch_lightning.callbacks import EarlyStopping
+
+cv2.setNumThreads(0)
+cv2.ocl.setUseOpenCL(False)
+
+
+class XviewDataset(Dataset):
+    def __init__(self, path, train=True):
+        super().__init__()
+        self.train = train
+        self.input_shape = (512, 512)
+        self.elastic = iaa.ElasticTransformation(alpha=(0.25, 1.2), sigma=0.2)
+        all_files = list(Path(path).rglob(pattern=f'*pre_*.json'))
+        train_files, val_files = train_test_split(all_files, test_size=0.1)
+        self.data_files = train_files if train else val_files
+
+    def __len__(self):
+        return len(self.data_files)
+
+    def __getitem__(self, idx):
+        return self._train_item(idx) if self.train else self._val_item(idx)
+
+    def _train_item(self, idx):
+
+        fn = str(self.data_files[idx]).replace('/labels/', '/images/').replace('json', 'png')
+
+        img = cv2.imread(fn, cv2.IMREAD_COLOR)
+
+        if random.random() > 0.985:
+            img = cv2.imread(fn.replace('_pre_disaster', '_post_disaster'), cv2.IMREAD_COLOR)
+
+        msk0 = cv2.imread(fn.replace('/images/', '/masks/'), cv2.IMREAD_UNCHANGED)
+
+        if random.random() > 0.5:
+            img = img[::-1, ...]
+            msk0 = msk0[::-1, ...]
+
+        if random.random() > 0.05:
+            rot = random.randrange(4)
+            if rot > 0:
+                img = np.rot90(img, k=rot)
+                msk0 = np.rot90(msk0, k=rot)
+
+        if random.random() > 0.9:
+            shift_pnt = (random.randint(-320, 320), random.randint(-320, 320))
+            img = shift_image(img, shift_pnt)
+            msk0 = shift_image(msk0, shift_pnt)
+            
+        if random.random() > 0.9:
+            rot_pnt =  (img.shape[0] // 2 + random.randint(-320, 320), img.shape[1] // 2 + random.randint(-320, 320))
+            scale = 0.9 + random.random() * 0.2
+            angle = random.randint(0, 20) - 10
+            if (angle != 0) or (scale != 1):
+                img = rotate_image(img, angle, scale, rot_pnt)
+                msk0 = rotate_image(msk0, angle, scale, rot_pnt)
+
+        crop_size = self.input_shape[0]
+        if random.random() > 0.3:
+            crop_size = random.randint(int(self.input_shape[0] / 1.1), int(self.input_shape[0] / 0.9))
+
+        bst_x0 = random.randint(0, img.shape[1] - crop_size)
+        bst_y0 = random.randint(0, img.shape[0] - crop_size)
+        bst_sc = -1
+        try_cnt = random.randint(1, 5)
+        for i in range(try_cnt):
+            x0 = random.randint(0, img.shape[1] - crop_size)
+            y0 = random.randint(0, img.shape[0] - crop_size)
+            _sc = msk0[y0:y0+crop_size, x0:x0+crop_size].sum()
+            if _sc > bst_sc:
+                bst_sc = _sc
+                bst_x0 = x0
+                bst_y0 = y0
+        x0 = bst_x0
+        y0 = bst_y0
+        img = img[y0:y0+crop_size, x0:x0+crop_size, :]
+        msk0 = msk0[y0:y0+crop_size, x0:x0+crop_size]
+
+        if crop_size != self.input_shape[0]:
+            img = cv2.resize(img, self.input_shape, interpolation=cv2.INTER_LINEAR)
+            msk0 = cv2.resize(msk0, self.input_shape, interpolation=cv2.INTER_LINEAR)
+
+        if random.random() > 0.99:
+            img = shift_channels(img, random.randint(-5, 5), random.randint(-5, 5), random.randint(-5, 5))
+
+        if random.random() > 0.99:
+            img = change_hsv(img, random.randint(-5, 5), random.randint(-5, 5), random.randint(-5, 5))
+
+        if random.random() > 0.99:
+            if random.random() > 0.99:
+                img = clahe(img)
+            elif random.random() > 0.99:
+                img = gauss_noise(img)
+            elif random.random() > 0.99:
+                img = cv2.blur(img, (3, 3))
+        elif random.random() > 0.99:
+            if random.random() > 0.99:
+                img = saturation(img, 0.9 + random.random() * 0.2)
+            elif random.random() > 0.99:
+                img = brightness(img, 0.9 + random.random() * 0.2)
+            elif random.random() > 0.99:
+                img = contrast(img, 0.9 + random.random() * 0.2)
+                
+        if random.random() > 0.999:
+            el_det = self.elastic.to_deterministic()
+            img = el_det.augment_image(img)
+
+        msk = msk0[..., np.newaxis]
+
+        msk = (msk > 127) * 1
+
+        img = preprocess_inputs(img)
+
+        img = torch.from_numpy(img.transpose((2, 0, 1))).float()
+        msk = torch.from_numpy(msk.transpose((2, 0, 1))).long()
+
+        sample = {'img': img, 'msk': msk, 'fn': fn}
+        return sample
+
+    def _val_item(self, idx):
+        fn = str(self.data_files[idx]).replace('/labels/', '/images/').replace('json', 'png')
+
+        img = cv2.imread(fn, cv2.IMREAD_COLOR)
+
+        msk0 = cv2.imread(fn.replace('/images/', '/masks/'), cv2.IMREAD_UNCHANGED)
+        
+        msk = msk0[..., np.newaxis]
+
+        msk = (msk > 127) * 1
+
+        img = preprocess_inputs(img)
+
+        img = torch.from_numpy(img.transpose((2, 0, 1))).float()
+        msk = torch.from_numpy(msk.transpose((2, 0, 1))).long()
+
+        sample = {'img': img, 'msk': msk, 'fn': fn}
+        return sample
+
+
+class SeResNext50Lightning(SeResNext50_Unet_Loc):
+
+    def __init__(self, **kwargs):
+        self.__dict__.update(kwargs)
+        super(SeResNext50Lightning, self).__init__()
+
+    def prepare_data(self):
+        self.train_dataset = XviewDataset('/newvolume/xview/data', train=True)
+        self.val_dataset = XviewDataset('/newvolume/xview/data', train=False)
+
+    def train_dataloader(self):
+        return DataLoader(self.train_dataset, batch_size=self.batch_size, num_workers=5, shuffle=True, pin_memory=False, drop_last=True)
+
+    def val_dataloader(self):
+        return DataLoader(self.val_dataset, batch_size=self.val_batch_size, num_workers=5, shuffle=False, pin_memory=False)
+
+    def configure_optimizers(self):
+        model = self.cuda()
+        params = model.parameters()
+        
+        optimizer = AdamW(params, lr=0.00015, weight_decay=1e-6)
+        model, optimizer = amp.initialize(model, optimizer, opt_level="O1")
+        self = nn.DataParallel(model).cuda()
+
+        scheduler = lr_scheduler.MultiStepLR(optimizer, milestones=[15, 29, 43, 53, 65, 80, 90, 100, 110, 130, 150, 170, 180, 190], gamma=0.5)
+
+        return [optimizer], [scheduler]
+
+    def seg_loss(self, y_hat, y):
+        return ComboLoss({'dice': 1.0, 'focal': 10.0}, per_image=False).cuda()(y_hat, y)
+
+    def training_step(self, batch, batch_idx):
+        imgs = batch["img"]
+        msks = batch["msk"]
+        out = self.forward(imgs)
+        loss = self.seg_loss(out, msks)
+
+        with torch.no_grad():
+            _probs = torch.sigmoid(out[:, 0, ...])
+            dice_sc = 1 - dice_round(_probs, msks[:, 0, ...])
+
+        return {'loss': loss, 'dice_sc': dice_sc}
+
+    def training_step_end(self, outputs):
+        dice_sc = outputs['dice_sc']
+        loss = outputs['loss']
+        with amp.scale_loss(loss, self.optimizer) as scaled_loss:
+            scaled_loss.backward()
+        torch.nn.utils.clip_grad_norm_(amp.master_params(self.optimizer), 1.1)
+        return outputs
+
+    def validation_step(self, batch, batch_idx):
+        imgs = batch["img"]
+        msks = batch["msk"]
+        out = self.forward(imgs)
+        loss = self.seg_loss(out, msks)
+
+        return {'loss': loss }
+
+    def validation_epoch_end(self, outputs):
+        avg_loss = torch.stack([torch.Tensor(x['loss']) for x in outputs]).mean()
+        return {'val_loss': avg_loss}
+
+
+
+model = SeResNext50Lightning(
+    batch_size = 15,
+    val_batch_size = 4,
+)
+
+trainer = Trainer(gpus=2, distributed_backend='dp')
+trainer.fit(model)
