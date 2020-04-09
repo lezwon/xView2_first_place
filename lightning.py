@@ -197,15 +197,9 @@ class SeResNext50Lightning(SeResNext50_Unet_Loc):
         return DataLoader(self.val_dataset, batch_size=self.val_batch_size, num_workers=5, shuffle=False, pin_memory=False)
 
     def configure_optimizers(self):
-        model = self.cuda()
-        params = model.parameters()
-        
+        params = self.parameters()
         optimizer = AdamW(params, lr=0.00015, weight_decay=1e-6)
-        model, optimizer = amp.initialize(model, optimizer, opt_level="O1")
-        self = nn.DataParallel(model).cuda()
-
         scheduler = lr_scheduler.MultiStepLR(optimizer, milestones=[15, 29, 43, 53, 65, 80, 90, 100, 110, 130, 150, 170, 180, 190], gamma=0.5)
-
         return [optimizer], [scheduler]
 
     def seg_loss(self, y_hat, y):
@@ -250,5 +244,5 @@ model = SeResNext50Lightning(
     val_batch_size = 4,
 )
 
-trainer = Trainer(gpus=2, distributed_backend='dp')
+trainer = Trainer(gpus=2, distributed_backend='dp', amp_level='O1', precision=16)
 trainer.fit(model)
