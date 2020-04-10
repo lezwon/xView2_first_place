@@ -221,9 +221,6 @@ class SeResNext50Lightning(SeResNext50_Unet_Loc):
     def training_step_end(self, outputs):
         dice_sc = outputs['dice_sc']
         loss = outputs['loss']
-        with amp.scale_loss(loss, self.optimizer) as scaled_loss:
-            scaled_loss.backward()
-        torch.nn.utils.clip_grad_norm_(amp.master_params(self.optimizer), 1.1)
         return outputs
 
     def validation_step(self, batch, batch_idx):
