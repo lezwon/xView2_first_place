@@ -43,6 +43,7 @@ from pathlib import Path
 from pytorch_lightning import LightningModule
 from pytorch_lightning import Trainer
 from pytorch_lightning.callbacks import EarlyStopping
+from pytorch_lightning.loggers import CometLogger
 
 cv2.setNumThreads(0)
 cv2.ocl.setUseOpenCL(False)
@@ -244,5 +245,13 @@ model = SeResNext50Lightning(
     val_batch_size = 4,
 )
 
-trainer = Trainer(gpus=2, distributed_backend='dp', amp_level='O1', precision=16)
+
+# arguments made to CometLogger are passed on to the comet_ml.Experiment class
+comet_logger = CometLogger(
+    api_key="rjFRslN5SxsTdEQOqr1RySaYl",
+    project_name="general", 
+    workspace="lezwon"
+)
+
+trainer = Trainer(gpus=2, distributed_backend='dp', amp_level='O1', precision=16, logger=comet_logger)
 trainer.fit(model)
