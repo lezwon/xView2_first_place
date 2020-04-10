@@ -218,11 +218,6 @@ class SeResNext50Lightning(SeResNext50_Unet_Loc):
 
         return {'loss': loss, 'dice_sc': dice_sc}
 
-    def training_step_end(self, outputs):
-        dice_sc = outputs['dice_sc']
-        loss = outputs['loss']
-        return outputs
-
     def validation_step(self, batch, batch_idx):
         imgs = batch["img"]
         msks = batch["msk"]
@@ -232,13 +227,13 @@ class SeResNext50Lightning(SeResNext50_Unet_Loc):
         return {'loss': loss }
 
     def validation_epoch_end(self, outputs):
-        avg_loss = torch.stack([torch.Tensor(x['loss']) for x in outputs]).mean()
+        avg_loss = torch.stack([x['loss'] for x in outputs]).mean()
         return {'val_loss': avg_loss}
 
 
 
 model = SeResNext50Lightning(
-    batch_size = 15,
+    batch_size = 10,
     val_batch_size = 4,
 )
 
@@ -250,5 +245,5 @@ comet_logger = CometLogger(
     workspace="lezwon"
 )
 
-trainer = Trainer(gpus=2, distributed_backend='dp', amp_level='O1', precision=16, logger=comet_logger)
+trainer = Trainer(gpus=2, distributed_backend='dp', logger=comet_logger)
 trainer.fit(model)
