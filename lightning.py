@@ -232,7 +232,7 @@ class SeResNext50Lightning(SeResNext50_Unet_Loc):
             _probs = torch.sigmoid(out[:, 0, ...])
             dice_sc = 1 - dice_round(_probs, msks[:, 0, ...])
 
-        self.logger.experiment.log_metric('loss', loss.mean(), step=batch_idx)
+        self.logger.experiment.log_metric('loss', loss.mean(), step=batch_idx, epoch=self.current_epoch)
         self.logger.experiment.log_metric('dice_sc', dice_sc.mean())
         return {'loss': loss, 'dice_sc': dice_sc}
 
