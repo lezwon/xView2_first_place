@@ -49,6 +49,21 @@ cv2.setNumThreads(0)
 cv2.ocl.setUseOpenCL(False)
 
 
+def dice(im1, im2, empty_score=1.0):
+
+    if im1.shape != im2.shape:
+        raise ValueError("Shape mismatch: im1 and im2 must have the same shape.")
+
+    im_sum = im1.sum() + im2.sum()
+    if im_sum == 0:
+        return empty_score
+
+    # Compute Dice coefficient
+    intersection = im1 & im2
+
+    return 2. * intersection.sum() / im_sum
+
+
 class XviewDataset(Dataset):
     def __init__(self, path, train=True):
         super().__init__()
@@ -185,6 +200,7 @@ class SeResNext50Lightning(SeResNext50_Unet_Loc):
 
     def __init__(self, **kwargs):
         self.__dict__.update(kwargs)
+        self.logger.experiment.log_parameters(kwargs)
         super(SeResNext50Lightning, self).__init__()
 
     def prepare_data(self):
@@ -216,24 +232,43 @@ class SeResNext50Lightning(SeResNext50_Unet_Loc):
             _probs = torch.sigmoid(out[:, 0, ...])
             dice_sc = 1 - dice_round(_probs, msks[:, 0, ...])
 
+        self.logger.experiment.log_metric('loss', loss.mean(), step=batch_idx)
+        self.logger.experiment.log_metric('dice_sc', dice_sc.mean())
         return {'loss': loss, 'dice_sc': dice_sc}
 
+    def on_train_end(self):
+        status = 'Interrupted' if self.interrupted else 'Completed'
+        self.logger.experiment.send_notification(self, "xView Completed", status=status)
+        return super().on_train_end()
+
     def validation_step(self, batch, batch_idx):
+        dices0 = []
+        _thr = 0.5
         imgs = batch["img"]
         msks = batch["msk"]
         out = self.forward(imgs)
         loss = self.seg_loss(out, msks)
 
-        return {'loss': loss }
+        msk_pred = torch.sigmoid(out[:, 0, ...])
+        
+        for j in range(msks.shape[0]):
+            dices0.append(dice(msks[j, 0].bool(), msk_pred[j] > _thr))
+
+        d0 = torch.Tensor(dices0).type_as(loss)
+        self.logger.experiment.log_metric('val_loss', loss.mean())
+        self.logger.experiment.log_metric('d0', d0.mean())
+
+        return {'loss':  d0}
 
     def validation_epoch_end(self, outputs):
-        avg_loss = torch.stack([x['loss'] for x in outputs]).mean()
+        avg_loss = torch.cat([x['loss'] for x in outputs]).mean()
+        self.logger.experiment.log_metric('avg_val_loss', avg_loss)
         return {'val_loss': avg_loss}
 
 
 
 model = SeResNext50Lightning(
-    batch_size = 10,
+    batch_size = 20,
     val_batch_size = 4,
 )
 
@@ -245,5 +280,6 @@ comet_logger = CometLogger(
     workspace="lezwon"
 )
 
-trainer = Trainer(gpus=2, distributed_backend='dp', logger=comet_logger)
+trainer = Trainer(gpus=2, distributed_backend='dp', logger=comet_logger, amp_level='O1', precision=16, profiler=True, log_gpu_memory=True, use_amp=True)
 trainer.fit(model)
+trainer.test()

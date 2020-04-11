@@ -1,2 +1,4 @@
 *.pyc
 .vscode
+lightning_logs
+general
