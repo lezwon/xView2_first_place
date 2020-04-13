@@ -42,8 +42,11 @@ import gc
 from pathlib import Path
 from pytorch_lightning import LightningModule
 from pytorch_lightning import Trainer
-from pytorch_lightning.callbacks import EarlyStopping
-from pytorch_lightning.loggers import CometLogger
+from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
+from pytorch_lightning.loggers import CometLogger, TensorBoardLogger
+
+import boto3
+
 
 cv2.setNumThreads(0)
 cv2.ocl.setUseOpenCL(False)
@@ -200,7 +203,6 @@ class SeResNext50Lightning(SeResNext50_Unet_Loc):
 
     def __init__(self, **kwargs):
         self.__dict__.update(kwargs)
-        self.logger.experiment.log_parameters(kwargs)
         super(SeResNext50Lightning, self).__init__()
 
     def prepare_data(self):
@@ -232,14 +234,23 @@ class SeResNext50Lightning(SeResNext50_Unet_Loc):
             _probs = torch.sigmoid(out[:, 0, ...])
             dice_sc = 1 - dice_round(_probs, msks[:, 0, ...])
 
-        self.logger.experiment.log_metric('loss', loss.mean(), step=batch_idx, epoch=self.current_epoch)
-        self.logger.experiment.log_metric('dice_sc', dice_sc.mean())
+        metrics = {
+            'loss': loss.mean().data.cpu().numpy(),
+            'dice_sc': dice_sc.mean().data.cpu().numpy()
+        }
+        self.logger.log_metrics(metrics, step=batch_idx)
         return {'loss': loss, 'dice_sc': dice_sc}
 
     def on_train_end(self):
         status = 'Interrupted' if self.interrupted else 'Completed'
-        self.logger.experiment.send_notification(self, "xView Completed", status=status)
-        return super().on_train_end()
+        self.logger.finalize(status)
+        # self.logger.experiment.send_notification(self, "xView Completed", status=status)
+        super().on_train_end()
+        if not self.interrupted:
+            ec2 = boto3.client('ec2')
+            instance_id = os.environ['INSTANCE_ID']
+            ec2.stop_instances(InstanceIds=[instance_id], DryRun=True)
+        return None
 
     def validation_step(self, batch, batch_idx):
         dices0 = []
@@ -247,23 +258,48 @@ class SeResNext50Lightning(SeResNext50_Unet_Loc):
         imgs = batch["img"]
         msks = batch["msk"]
         out = self.forward(imgs)
-        loss = self.seg_loss(out, msks)
-
-        msk_pred = torch.sigmoid(out[:, 0, ...])
         
+        _probs = torch.sigmoid(out[:, 0, ...])
+        loss = dice_round(_probs, msks[:, 0, ...])
+        seg_loss = self.seg_loss(out, msks)
+
         for j in range(msks.shape[0]):
-            dices0.append(dice(msks[j, 0].bool(), msk_pred[j] > _thr))
+            dices0.append(dice(msks[j, 0].bool(), _probs[j] > _thr))
 
-        d0 = torch.Tensor(dices0).type_as(loss)
-        self.logger.experiment.log_metric('val_loss', loss.mean())
-        self.logger.experiment.log_metric('d0', d0.mean())
+        d0 = torch.Tensor(dices0).type_as(seg_loss)
 
-        return {'loss':  d0}
+        metrics = {
+            'val_loss': loss.mean().data.cpu().numpy(),
+            'seg_loss': seg_loss.mean().data.cpu().numpy(),
+            'accuracy': d0.mean().data.cpu().numpy()
+        }
+
+        self.logger.log_metrics(metrics, step=batch_idx)
+
+        # self.logger.experiment.log_metric('val_loss', loss.mean().data.cpu().numpy(), step=batch_idx, epoch=self.current_epoch)
+        # self.logger.experiment.log_metric('seg_loss', seg_loss.mean().data.cpu().numpy(), step=batch_idx, epoch=self.current_epoch)
+        # self.logger.experiment.log_metric('accuracy', d0.mean().data.cpu().numpy(), step=batch_idx, epoch=self.current_epoch)
+
+        return {'loss':  loss, 'seg_loss': seg_loss, 'accuracy': d0 }
 
     def validation_epoch_end(self, outputs):
         avg_loss = torch.cat([x['loss'] for x in outputs]).mean()
-        self.logger.experiment.log_metric('avg_val_loss', avg_loss)
-        return {'val_loss': avg_loss}
+        avg_seg_loss = torch.cat([x['seg_loss'] for x in outputs]).mean()
+        avg_accuracy = torch.cat([x['accuracy'] for x in outputs]).mean()
+
+        metrics = {
+            'avg_val_loss': avg_loss.data.cpu().numpy(),
+            'avg_seg_loss': avg_seg_loss.data.cpu().numpy(),
+            'avg_accuracy': avg_accuracy.data.cpu().numpy()
+        }
+
+        self.logger.log_metrics(metrics, step=self.current_epoch)
+
+        # self.logger.experiment.log_metric('avg_val_loss', avg_loss.data.cpu().numpy(), epoch=self.current_epoch)
+        # self.logger.experiment.log_metric('avg_seg_loss', avg_seg_loss.data.cpu().numpy(), epoch=self.current_epoch)
+        # self.logger.experiment.log_metric('avg_accuracy', avg_accuracy.data.cpu().numpy(), epoch=self.current_epoch)
+        
+        return {'val_acc': avg_accuracy, 'val_loss': avg_loss, 'val_seg_loss': avg_seg_loss}
 
 
 
@@ -272,14 +308,24 @@ model = SeResNext50Lightning(
     val_batch_size = 4,
 )
 
+# model = SeResNext50Lightning.load_from_checkpoint(checkpoint_path="epoch_13.ckpt")
 
 # arguments made to CometLogger are passed on to the comet_ml.Experiment class
 comet_logger = CometLogger(
-    api_key="rjFRslN5SxsTdEQOqr1RySaYl",
+    # api_key="rjFRslN5SxsTdEQOqr1RySaYl",
+    save_dir="comet",
     project_name="general", 
     workspace="lezwon"
 )
 
-trainer = Trainer(gpus=2, distributed_backend='dp', logger=comet_logger, amp_level='O1', precision=16, profiler=True, log_gpu_memory=True, use_amp=True)
+tb_logger = TensorBoardLogger("lightning_logs", name="SeResNext50Lightning")
+
+checkpoint_callback = ModelCheckpoint(
+    filepath='checkpoints/{epoch}-{val_loss:.2f}-{val_acc:.2f}',
+     monitor='val_acc',
+     save_top_k=-1
+     )
+
+trainer = Trainer(gpus=2, distributed_backend='dp', logger=[comet_logger, tb_logger], amp_level='O1', precision=16, profiler=True, log_gpu_memory=True, use_amp=True, auto_lr_find=True, resume_from_checkpoint='epoch_17.ckpt', checkpoint_callback=checkpoint_callback)
 trainer.fit(model)
 trainer.test()

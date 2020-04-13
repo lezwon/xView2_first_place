@@ -2,3 +2,7 @@
 .vscode
 lightning_logs
 general
+comet
+*.ckpt
+*.pkl
+tb_logs
